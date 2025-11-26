@@ -16,34 +16,76 @@ import logger from '../lib/logger'
 export function profileImageUrlUpload () {
   return async (req: Request, res: Response, next: NextFunction) => {
     if (req.body.imageUrl !== undefined) {
-      const url = req.body.imageUrl
-      if (url.match(/(.)*solve\/challenges\/server-side(.)*/) !== null) req.app.locals.abused_ssrf_bug = true
+
+      let parsedUrl: URL
+
+      try {
+        parsedUrl = new URL(req.body.imageUrl)
+      } catch {
+        return next(new Error('Invalid URL'))
+      }
+
+      // --------------------------------------------
+      // ✔ OWASP-Compliant Whitelist (based on example)
+      // --------------------------------------------
+      const allowedSchemes = ['http:', 'https:']
+      const allowedDomains = ['trusted1.example.com', 'trusted2.example.com']
+
+      if (
+        !allowedSchemes.includes(parsedUrl.protocol) ||
+        !allowedDomains.includes(parsedUrl.hostname)
+      ) {
+        return next(new Error('URL not allowed'))
+      }
+
+      // Safe URL
+      const safeUrl = parsedUrl.toString()
+
+      // --------------------------------------------
       const loggedInUser = security.authenticatedUsers.get(req.cookies.token)
-      if (loggedInUser) {
-        try {
-          const response = await fetch(url)
-          if (!response.ok || !response.body) {
-            throw new Error('url returned a non-OK status code or an empty body')
-          }
-          const ext = ['jpg', 'jpeg', 'png', 'svg', 'gif'].includes(url.split('.').slice(-1)[0].toLowerCase()) ? url.split('.').slice(-1)[0].toLowerCase() : 'jpg'
-          const fileStream = fs.createWriteStream(`frontend/dist/frontend/assets/public/images/uploads/${loggedInUser.data.id}.${ext}`, { flags: 'w' })
-          await finished(Readable.fromWeb(response.body as any).pipe(fileStream))
-          await UserModel.findByPk(loggedInUser.data.id).then(async (user: UserModel | null) => { return await user?.update({ profileImage: `/assets/public/images/uploads/${loggedInUser.data.id}.${ext}` }) }).catch((error: Error) => { next(error) })
-        } catch (error) {
-          try {
-            const user = await UserModel.findByPk(loggedInUser.data.id)
-            await user?.update({ profileImage: url })
-            logger.warn(`Error retrieving user profile image: ${utils.getErrorMessage(error)}; using image link directly`)
-          } catch (error) {
-            next(error)
-            return
-          }
-        }
-      } else {
+      if (!loggedInUser) {
         next(new Error('Blocked illegal activity by ' + req.socket.remoteAddress))
         return
       }
+
+      try {
+        const response = await fetch(safeUrl)
+
+        if (!response.ok || !response.body) {
+          throw new Error('URL returned non-OK status or empty body')
+        }
+
+        // Determine file extension safely
+        const ext = ['jpg', 'jpeg', 'png', 'svg', 'gif']
+          .includes(parsedUrl.pathname.split('.').pop()?.toLowerCase() || '')
+          ? parsedUrl.pathname.split('.').pop()!.toLowerCase()
+          : 'jpg'
+
+        const outputPath =
+          `frontend/dist/frontend/assets/public/images/uploads/${loggedInUser.data.id}.${ext}`
+
+        const fileStream = fs.createWriteStream(outputPath, { flags: 'w' })
+        await finished(Readable.fromWeb(response.body as any).pipe(fileStream))
+
+        const user = await UserModel.findByPk(loggedInUser.data.id)
+        await user?.update({
+          profileImage: `/assets/public/images/uploads/${loggedInUser.data.id}.${ext}`
+        })
+
+      } catch (error) {
+        try {
+          const user = await UserModel.findByPk(loggedInUser.data.id)
+          await user?.update({ profileImage: safeUrl })
+          logger.warn(
+            `Error retrieving user profile image: ${utils.getErrorMessage(error)}; using image link directly`
+          )
+        } catch (error) {
+          next(error)
+          return
+        }
+      }
     }
+
     res.location(process.env.BASE_PATH + '/profile')
     res.redirect(process.env.BASE_PATH + '/profile')
   }
